@@ -4,14 +4,16 @@
 
 #include "tools/erasor_utils.hpp"
 #include <boost/format.hpp>
+#include <boost/bind.hpp>
 #include <cstdlib>
 #include <erasor/OfflineMapUpdater.h>
+#include "std_msgs/String.h"
 
 string DATA_DIR;
 int INTERVAL, INIT_IDX;
 float VOXEL_SIZE;
 bool STOP_FOR_EACH_FRAME;
-std::string filename = "/staticmap_via_erasor.pcd";
+//std::string filename = "/staticmap_via_erasor.pcd";
 
 using PointType = pcl::PointXYZI;
 
@@ -30,7 +32,7 @@ vector<float> split_line(string input, char delimiter) {
 void load_all_poses(string txt, vector<Eigen::Matrix4f >& poses){
     // These poses are already w.r.t body frame!
     // Thus, tf4x4 by pose * corresponding cloud -> map cloud
-    cout<<"Target path: "<< txt<<endl;
+    //cout<<"Target path: "<< txt<<endl;
     poses.clear();
     poses.reserve(2000);
     std::ifstream in(txt);
@@ -48,9 +50,8 @@ void load_all_poses(string txt, vector<Eigen::Matrix4f >& poses){
         Eigen::Translation3f ts(pose[2], pose[3], pose[4]);
         Eigen::Quaternionf q(pose[8], pose[5], pose[6], pose[7]);
         Eigen::Matrix4f tf4x4_cam = Eigen::Matrix4f::Identity(); // Crucial!
-        tf4x4_cam.topLeftCorner<3, 3>(0, 0) = q.toRotationMatrix();
+        tf4x4_cam.topLeftCorner<3, 3>() = q.toRotationMatrix(); // tf4x4_cam.topLeftCorner<3, 3>(0, 0) = q.toRotationMatrix(); orogin
         tf4x4_cam.topRightCorner(3, 1) = ts.vector();
-
         Eigen::Matrix4f tf4x4_lidar = tf4x4_cam;
         poses.emplace_back(tf4x4_lidar);
         count++;
@@ -58,24 +59,23 @@ void load_all_poses(string txt, vector<Eigen::Matrix4f >& poses){
     std::cout<<"Total "<<count<<" poses are loaded"<<std::endl;
 }
 
-int main(int argc, char **argv)
-{
-    ros::init(argc, argv, "erasor_in_your_env");
-    ros::NodeHandle nh;
+void erasor_callback(const std_msgs::String::ConstPtr& msg, ros::NodeHandle nh){
+    
     erasor::OfflineMapUpdater updater = erasor::OfflineMapUpdater();
 
-    nh.param<string>("/data_dir", DATA_DIR, "/");
-    nh.param<float>("/voxel_size", VOXEL_SIZE, 0.075);
+    DATA_DIR = msg->data;
+    //nh.param<string>("/data_dir", DATA_DIR, "/");
+    nh.param<float>("/voxel_size", VOXEL_SIZE, 0.01);
     nh.param<int>("/init_idx", INIT_IDX, 0);
     nh.param<int>("/interval", INTERVAL, 2);
     nh.param<bool>("/stop_for_each_frame", STOP_FOR_EACH_FRAME, false);
 
-    std::string staticmap_path = std::getenv("HOME") + filename;
+    //std::string staticmap_path = std::getenv("HOME") + filename;
 
     // Set ROS visualization publishers
     ros::Publisher NodePublisher = nh.advertise<erasor::node>("/node/combined/optimized", 100);
     ros::Rate loop_rate(10);
-
+    
     /***
      * Set target data
      * Note that pcd files are in `pcd_dir`
@@ -93,17 +93,17 @@ int main(int argc, char **argv)
     string pose_path = DATA_DIR + "/poses_lidar2body.csv";
     string pcd_dir = DATA_DIR + "/pcds"; //
     // Load raw pointcloud
-
+    
     vector<Eigen::Matrix4f> poses;
     load_all_poses(pose_path, poses);
 
-    int N = poses.size();
+    int N = poses.size();  
 
     for (int i = INIT_IDX; i < N; ++i) {
         signal(SIGINT, erasor_utils::signal_callback_handler);
-
         pcl::PointCloud<PointType>::Ptr srcCloud(new pcl::PointCloud<PointType>);
-        string pcd_name = (boost::format("%s/%06d.pcd") % pcd_dir % i).str();
+        string pcd_name = (boost::format("%s/%d.pcd") % pcd_dir % i).str();
+        
         erasor_utils::load_pcd(pcd_name, srcCloud);
 
         erasor::node node;
@@ -113,7 +113,6 @@ int main(int argc, char **argv)
         NodePublisher.publish(node);
         ros::spinOnce();
         loop_rate.sleep();
-
         if (STOP_FOR_EACH_FRAME) {
             cout<< "[Debug]: STOP! Press any button to continue" <<endl;
             cin.ignore();
@@ -122,6 +121,15 @@ int main(int argc, char **argv)
 
     updater.save_static_map(0.2);
 
+}
+
+int main(int argc, char **argv)
+{
+    ros::init(argc, argv, "erasor_in_your_env");
+    ros::NodeHandle nh;
+    ros::Subscriber sub_dirname = nh.subscribe<std_msgs::String>
+            ("saved_data_dir",100000,boost::bind(&erasor_callback, _1, nh));
+    ros::spin();
     cout<< "Static map building complete!" << endl;
 
     return 0;
